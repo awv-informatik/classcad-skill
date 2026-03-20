@@ -1,6 +1,6 @@
 {
   "name": "classcad-skill",
   "version": "1.0.0",
-  "description": "ClassCAD API skill — reference docs and verified AGENT NOTEs for the ClassCAD headless CAD engine",
+  "description": "LLM skill for the ClassCAD headless CAD engine — structured API references with verified annotations that help AI agents generate correct ClassCAD code",
   "license": "UNLICENSED"
 }
