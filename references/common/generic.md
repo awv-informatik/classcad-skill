@@ -32,9 +32,12 @@ Every ClassCAD API call returns a response envelope. The docs describe it as `{ 
 
 **`id`:** Positive integers (`typeof === 'number'`, `Number.isInteger() === true`). IDs are monotonically increasing with variable gaps — each creation allocates internal child objects, so gaps depend on the object type (part.create consumes ~50 IDs, box ~37). As parameters, IDs accept numbers and string-encoded numbers (`4`, `"4"`, `" 4 "`, even `"4.0"` all work — the parser trims whitespace and coerces float strings). Float numbers (4.5), zero, negative, null, booleans, empty strings, and JS objects all fail. See [ID System](#id-system) for full details.
 
-**`point`:** Two representations exist — **do not confuse them:**
-- **API parameters** use `[x, y, z]` arrays (e.g. `startPos: [0, 0, 0]`)
-- **API results, structure tree, and expressions** use `{x, y, z}` objects
+**`point`:** Two representations exist:
+- **API parameters** accept BOTH `[x, y, z]` arrays AND `{x, y, z}` objects (e.g. `startPos: [0, 0, 0]` or `startPos: {x: 0, y: 0, z: 0}`)
+- **API results, structure tree, and expressions** always return `{x, y, z}` objects
+- **Must be exactly 3 components.** `[x, y]`, `[x]`, `[x,y,z,w]`, and `[]` all fail with: "If point is defined as array, it must have exactly 3 real values". For sketch geometry on the XY plane, pass `z: 0` explicitly.
+- **Full double precision** — values like `0.000001` and `999999.999999` are preserved exactly.
+- **Direction vectors** (e.g. `xVec`, `yVec` in `setObjectCoordSystem`) must be non-zero. Zero vectors `[0,0,0]` fail: "Vectors for SetCoordSystem may not have length 0".
 
 **`string`:** Full Unicode including emoji. `getUserData` returns `""` for missing keys (no error) — you cannot distinguish "key exists with empty value" from "key does not exist".
 
@@ -139,7 +142,19 @@ Extra/unknown parameters are silently ignored — no warning.
 
 **Arithmetic:** `+`, `-`, `*`, `/` work on reals. Use `pow(x, y)` for exponentiation — `^` is **NOT** a power operator (silently returns null).
 
-**Functions:** `sin`, `cos`, `sqrt`, `pow`, `exp`, `ln`, etc. Constants use `C:` prefix: `C:PI`.
+**Available functions:**
+
+| Category | Functions | Notes |
+|----------|-----------|-------|
+| Trig | `sin`, `cos`, `tan`, `asin`, `acos`, `atan` | All radians. **`atan2` does NOT exist.** |
+| Math | `sqrt`, `pow(x,y)`, `abs`, `exp` | `pow` is the only way to exponentiate |
+| Logarithmic | `log` (base 10), `ln` (natural) | `log(100)` → `2`, `ln(exp(1))` → `1` |
+| Min/Max | `min(a,b)`, `max(a,b)` | Work on reals |
+| **Missing** | `floor`, `ceil`, `round`, `mod`, `atan2`, `if` | None of these exist |
+
+**Constants:** Only `C:PI` (3.14159...). `C:E`, `C:2PI`, `C:HALF_PI`, `C:INF` do **NOT** exist. Use `exp(1)` for Euler's number.
+
+**Degree suffix:** `Ndeg` converts degrees to radians in expressions: `180deg` → PI, `sin(90deg)` → 1. No `rad` suffix (angles are already radians).
 
 **Points:** Literal syntax `{x, y, z}` (curly braces, exactly 3 components). Returns `{x, y, z}` object.
 - Point arithmetic: `{1,2,3}+{4,5,6}` → `{x:5,y:7,z:9}`
@@ -148,7 +163,7 @@ Extra/unknown parameters are silently ignored — no warning.
 
 **Arrays:** `[1,2,3]` syntax, supports nesting `[[1,2],[3,4]]` and mixed types `[{1,2,3},{4,5,6}]`.
 
-**Booleans:** `TRUE` → `1`, `FALSE` → `0` (uppercase only). Comparison operators (`==`, `>`, `<`) do NOT work.
+**Booleans:** `TRUE` → `1`, `FALSE` → `0` (uppercase only). Booleans are numeric — `TRUE + TRUE` → `2`, `TRUE * 5` → `5`. Comparison operators (`==`, `>`, `<`) do NOT work. String literals (`"hello"`) are supported.
 
 **`silent` mode:** `evaluateExpression({ expression, silent: true })` suppresses ALL messages on failure — `messages: []`, `maxLevel: 31`, `result: null`. The expression still fails but the failure is invisible. There is no way to distinguish a silent failure from a VOID success. Avoid `silent: true` unless you intentionally want to suppress errors.
 
@@ -254,6 +269,51 @@ Use `structure.root` to find the part ID. Use `structure.tree[String(id)]` to in
 ### Batch and IDs
 
 `common.batch` has no dynamic ID forwarding — you cannot reference the result of job 0 in job 1's parameters. Since `part.create` always returns ID 4 on a clean drawing, you can hardcode it. For anything else, use sequential `execute()` calls.
+
+## Coordinate System
+
+ClassCAD uses a **right-handed coordinate system**:
+- **X** → right (Right plane normal)
+- **Y** → forward (Front plane normal)
+- **Z** → up (Top plane normal)
+
+Default work planes: Top (XY, Z-normal), Front (XZ, Y-normal), Right (YZ, X-normal).
+
+## Angles
+
+**All angles are in radians** throughout the API — revolve, twist, chamfer, circular patterns, rotation vectors, `workCSys` rotation, expression trig functions. There is no degree mode.
+
+**`deg` suffix in expressions:** The expression engine supports `Ndeg` to convert degrees to radians: `180deg` → `3.14159...` (PI), `sin(90deg)` → `1`. There is no `rad` suffix (angles are already radians).
+
+**Trig functions:** `sin`, `cos`, `tan`, `asin`, `acos`, `atan` — all in radians. **`atan2` does NOT exist** — use `atan` (single-argument) only.
+
+## Rotation Vectors
+
+Many APIs (`solid.box`, `solid.copy`, `part.workCSys`, etc.) accept a `rotation: [rx, ry, rz]` parameter:
+- Each component is a rotation around that axis, in radians
+- `[0, 0, PI/4]` → 45° rotation around Z axis
+- `[PI/2, 0, 0]` → 90° rotation around X axis
+
+**`rotateFirst` parameter** (default: `TRUE`): When both `rotation` and `translation` are provided, rotation is applied first by default. Set to `FALSE` to translate first.
+
+## Transformation Matrix
+
+`common.transformObjectWithMatrix` accepts a 4x4 matrix. **Must be exactly 4x4** — 3x3 fails: "The provided matrix is not a 4x4 matrix".
+
+**Layout:** Standard math convention — translation in the last column:
+
+```js
+matrix: [
+  [R00, R01, R02, Tx],  // row 0
+  [R10, R11, R12, Ty],  // row 1
+  [R20, R21, R22, Tz],  // row 2
+  [0,   0,   0,   1 ],  // row 3
+]
+```
+
+**`isGlobal` parameter** (default: `TRUE`): When `TRUE`, the matrix is in global coordinates. When `FALSE`, it's in the object's local coordinate system.
+
+**Behavior:** Transforms the part's global coordinate system — internal geometry positions remain in local coordinates. The structure tree always shows local coordinates, so work axis directions do not visibly change. Matrices compose — applying the same transform twice doubles the effect.
 
 ## Known Doc Discrepancies
 
