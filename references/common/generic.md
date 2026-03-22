@@ -30,7 +30,7 @@ Every ClassCAD API call returns a response envelope. The docs describe it as `{ 
 
 **`boolean`:** Universally `1`/`0` numbers — in API results, object fields, and expressions. Never JS `true`/`false`. Expression constants are `TRUE`/`FALSE` (uppercase only; lowercase `true`/`false` are not recognized).
 
-**`id`:** Positive integers. IDs are sequential but with gaps (a part creates ~50 child objects, so the next part ID is ~50 higher). As parameters, IDs accept both numbers and string-encoded numbers (`4` and `"4"` both work). Float, negative, and zero values fail.
+**`id`:** Positive integers (`typeof === 'number'`, `Number.isInteger() === true`). IDs are monotonically increasing with variable gaps — each creation allocates internal child objects, so gaps depend on the object type (part.create consumes ~50 IDs, box ~37). As parameters, IDs accept numbers and string-encoded numbers (`4`, `"4"`, `" 4 "`, even `"4.0"` all work — the parser trims whitespace and coerces float strings). Float numbers (4.5), zero, negative, null, booleans, empty strings, and JS objects all fail. See [ID System](#id-system) for full details.
 
 **`point`:** Two representations exist — **do not confuse them:**
 - **API parameters** use `[x, y, z]` arrays (e.g. `startPos: [0, 0, 0]`)
@@ -89,10 +89,10 @@ In practice, `maxLevel == 31` means success, `maxLevel >= 51` means failure. War
 | 1001 | Wrong parameter type             | String where boolean expected                |
 | 1003 | Empty parameter object           | Passing `param: {}` where non-empty expected |
 | 1004 | Missing required parameter       | Omitting `expression` from evaluateExpression|
-| 1006 | Invalid ID                       | Nonexistent ID, string as ID                 |
-| 1007 | Wrong ID type                    | Part ID where feature/operation ID expected  |
+| 1006 | Invalid ID                       | Nonexistent ID, float ID, already-deleted ID |
+| 1007 | Wrong ID type                    | Part ID where feature ID expected, vice versa|
 | 1013 | Invalid parameter value          | Invalid enum value — message lists valid options |
-| 1200 | Root already exists              | Second `part.create` in same drawing         |
+| 1200 | Root already exists / not editable | Second `part.create`, or `update*` on locked feature |
 | 1201 | Unknown command                  | `v1.common.doesNotExist`, `sketch.isSolved`  |
 
 **Multiple messages per call:** A single call can return multiple messages. Typically a WARNING (41) precedes the ERROR (51) — e.g. "couldn't convert to id" (warning) then "invalid id" (error).
@@ -155,6 +155,105 @@ Extra/unknown parameters are silently ignored — no warning.
 ## Drawing Constraints
 
 - **One root per drawing:** Only one `part.create` or `assembly.create` per drawing. Second call fails with code 1200. Must `clear` first to start over.
+
+<a name="id-system"></a>
+
+## ID System
+
+Every object in ClassCAD has a unique integer ID. IDs are the primary mechanism for referencing objects across API calls.
+
+### ID Lifecycle
+
+- **Creation:** APIs like `part.create`, `part.box`, `sketch.create`, `sketch.line` return IDs. Single-object APIs return a number; multi-object APIs (e.g. `sketch.rectangle`) return `Array<number>`.
+- **Consumption:** Most APIs take an `id` parameter to identify which object to operate on. The `common.*` APIs (`setObjectName`, `setUserData`, `transformObjectWithMatrix`) accept ANY valid object ID regardless of class.
+- **Deletion:** `part.deleteFeature({ ids: [...] })` removes features. Deleted IDs become invalid immediately and are never recycled.
+- **Clear:** `common.clear()` invalidates ALL IDs. IDs restart from the same sequence (part.create → 4 again). `clear({ keepIds: [id] })` preserves the named object AND its entire subtree — all children, features, and solids survive with their original IDs.
+
+### ID Validation
+
+APIs validate both existence and class of IDs:
+
+| Error | Meaning | Example |
+|-------|---------|---------|
+| code 1006 | ID doesn't exist | Nonexistent, deleted, or float ID |
+| code 1007 | ID exists but wrong class | Feature ID where part ID expected |
+| code 1001 | Wrong param type (helpful) | Lists valid types: `"Provide only following id types: [\"part\"]"` |
+| ToId() warning (code 0) | Couldn't parse to ID | Precedes 1006 errors; indicates the value failed internal conversion |
+
+**Error 1001 is more helpful than 1007** — it lists the valid ID types for that parameter. Not all APIs use 1001; some give 1007 without listing alternatives.
+
+### ID Type Expectations
+
+**Create APIs** (e.g. `part.box`, `sketch.create`) expect the **parent container ID** — typically a part ID. The `id` parameter is "where to create this thing."
+
+**Update APIs** (e.g. `updateBox`, `updateCylinder`) expect the **feature ID** — the ID returned from the corresponding create call. **Warning:** update APIs also require the feature to be "active and open" (code 1200 if not). Features become locked after creation; they must be explicitly reopened for editing (parametric modeling concept — covered in Step 7).
+
+**Common APIs** (`setObjectName`, `setUserData`, `transformObjectWithMatrix`) are polymorphic — they accept any valid object ID: parts, features, sketches, work planes, sketch elements, even internal objects like ExpressionSet.
+
+### Accepted ID Formats
+
+| Format | Works? | Notes |
+|--------|--------|-------|
+| `4` (integer) | ✓ | Standard usage |
+| `"4"` (string) | ✓ | String-encoded integer |
+| `" 4 "` (padded string) | ✓ | Whitespace trimmed |
+| `"4.0"` (float string) | ✓ | Coerced to integer |
+| `4.5` (float number) | ❌ | ToId() warning + code 1006 |
+| `0` | ❌ | Not a valid object |
+| `-1` | ❌ | Not a valid object |
+| `null` | ❌ | code 1004 "must be provided" |
+| `true` | ❌ | code 1007 |
+| `{id: 4}` (object) | ❌ | Internal VM error |
+| `""` (empty string) | ❌ | code 1004 |
+
+String IDs work in `Array<id>` parameters too (e.g. `keepIds`, `requestVisualisation.ids`).
+
+### Object Hierarchy
+
+After `part.create`, ~24 objects exist in a tree:
+
+```
+AllObjects (1)
+└── CC_Part (4) ← returned by part.create
+    ├── CC_ExpressionSet (6)
+    ├── CC_DimensionSet (8)
+    ├── CC_GeometrySet (10)
+    │   ├── CC_WorkPoint "Origin" (22)
+    │   ├── CC_WorkAxis "XAxis" (26), "YAxis" (30), "ZAxis" (34)
+    │   └── CC_WorkPlane "Top" (38), "Front" (42), "Right" (46)
+    ├── CC_ReferenceSet (12)
+    ├── CC_SketchSet (14)
+    ├── CC_EntitySet (16)
+    └── CC_OperationSequence (18)
+        ├── Work geometry references (24, 28, 32, 36, 40, 44, 48)
+        └── CC_RollbackBar (20)
+```
+
+Features (box, cylinder, etc.) are added under EntitySet. Each feature also creates a CC_OperationReference under OperationSequence and a CC_Solid child.
+
+### Structure Tree
+
+The `structure` field in every response contains the full scene graph:
+
+```js
+{
+  root: 4,              // ID of the root product (part or assembly)
+  currentProduct: 4,    // currently active product
+  currentInstance: 0,   // 0 = no instance (single-part mode)
+  testRoot: 0,          // internal
+  tree: {               // flat map keyed by string ID
+    "4": { id: 4, class: "CC_Part", name: "...", parent: 1, children: [...], members: {...} },
+    "54": { id: 54, class: "CC_Box", ... },
+    ...
+  }
+}
+```
+
+Use `structure.root` to find the part ID. Use `structure.tree[String(id)]` to inspect any object.
+
+### Batch and IDs
+
+`common.batch` has no dynamic ID forwarding — you cannot reference the result of job 0 in job 1's parameters. Since `part.create` always returns ID 4 on a clean drawing, you can hardcode it. For anything else, use sequential `execute()` calls.
 
 ## Known Doc Discrepancies
 
