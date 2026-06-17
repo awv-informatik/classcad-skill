@@ -23,7 +23,8 @@ Cuts tool solids from a target solid (boolean subtract). The target is modified 
 
 ## Gotchas
 
-- **CRITICAL: Never pass consumed solid IDs to any solid operation.** After a default subtraction (keepTools=false), referencing a tool solid ID in `solid.translation`, `solid.copy`, `solid.subtraction`, etc. **hangs the ClassCAD server** — 100% CPU, no response, requires `kill -9` and worker restart. This is the same hang behavior documented for self-union. Always track which IDs are still valid.
+- **CRITICAL: Never pass consumed solid IDs to any solid operation.** After a default subtraction (keepTools=false), referencing a tool solid ID in `solid.translation`, `solid.copy`, `solid.subtraction`, etc. **hangs the ClassCAD server** — 100% CPU, no response, requires `kill -9` and worker restart. (This consumed-ID hang is a separate, still-open bug.) Always track which IDs are still valid.
+- **Same solid as both target and tool is rejected** with `maxLevel 51`, message `"A boolean operation requires distinct target and tool entities (the same id was given for both)."` Previously hung the server; fixed in classcad/runtime branch `fix/boolean-self-reference-hang`.
 - **Non-overlapping tools are silent no-ops.** A tool that doesn't intersect the target produces no error — the target is unchanged, but the tool is still consumed (unless keepTools=true).
 - **Tool enveloping target destroys the target.** If the tool completely contains the target, the subtraction removes the target entirely. Result is null, maxLevel=51, code 1014.
 - **Empty tools array is a no-op.** `tools: []` succeeds silently — returns target ID unchanged, maxLevel=31.
